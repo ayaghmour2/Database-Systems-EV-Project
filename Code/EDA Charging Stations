@@ -1,0 +1,269 @@
+import pandas as pd
+
+import pandas as pd
+
+file_path = r"C:\Users\micha\OneDrive\Desktop\MSDS 420\Group Project\Charging Dataset\Electric and Alternative Fuel Charging Stations.csv"
+
+# Load the dataset
+df = pd.read_csv(file_path)
+
+# Preview
+df.head()
+# Step 1: Filter to only electric stations
+ev_df = df[df['Fuel Type Code'] == 'ELEC']
+
+# Step 2: Further filter to only Illinois stations
+ev_il_df = ev_df[ev_df['State'] == 'IL']
+
+# Step 3: Check how many records and preview
+print(ev_il_df.shape)
+ev_il_df.columns
+ev_il_df.info()
+ev_il_df.head()
+ev_il_df.columns
+ev_il_df.info()
+#Columns to Drop as they are completely empty or nearly empty 
+cols_to_drop = [
+    'Plus4', 'BD Blends', 'NG Fill Type Code', 'NG PSI',
+    'Expected Date', 'Cards Accepted', 'EV Other Info',
+    'Federal Agency ID', 'Federal Agency Name',
+    'Hydrogen Status Link', 'NG Vehicle Class', 'LPG Primary',
+    'E85 Blender Pump', 'Intersection Directions (French)',
+    'Access Days Time (French)', 'BD Blends (French)',
+    'Groups With Access Code (French)', 'Hydrogen Is Retail',
+    'Federal Agency Code', 'CNG Dispenser Num', 'CNG On-Site Renewable Source',
+    'CNG Total Compression Capacity', 'CNG Storage Capacity',
+    'LNG On-Site Renewable Source', 'E85 Other Ethanol Blends',
+    'EV Pricing (French)', 'LPG Nozzle Types', 'Hydrogen Pressures',
+    'Hydrogen Standards', 'CNG Fill Type Code', 'CNG PSI',
+    'CNG Vehicle Class', 'LNG Vehicle Class', 'EV On-Site Renewable Source'
+]
+
+# Drop columns from your Illinois EV dataset
+ev_il_df = ev_il_df.drop(columns=cols_to_drop, errors = 'ignore')
+
+# Check remaining shape and preview
+print(ev_il_df.shape)
+ev_il_df.head()
+ev_il_df.info()
+# Fill NA with 0 for charger counts
+for col in ['EV Level1 EVSE Num', 'EV Level2 EVSE Num', 'EV DC Fast Count']:
+    ev_il_df[col] = ev_il_df[col].fillna(0)
+
+# Create total chargers column
+ev_il_df['Total Chargers'] = (
+    ev_il_df['EV Level1 EVSE Num'] +
+    ev_il_df['EV Level2 EVSE Num'] +
+    ev_il_df['EV DC Fast Count']
+)
+
+# Check new shape and preview
+print(ev_il_df.shape)
+ev_il_df[['Station Name', 'City', 'ZIP', 'Total Chargers']].head()
+#Group by Zip to understand well-served vs underserved areas
+zip_summary = (
+    ev_il_df.groupby('ZIP')
+    .agg({
+        'Total Chargers': 'sum',
+        'EV Level2 EVSE Num': 'sum',
+        'EV DC Fast Count': 'sum',
+        'Station Name': 'count'  # total stations
+    })
+    .rename(columns={'Station Name': 'Station Count'})
+    .sort_values('Total Chargers', ascending=False)
+)
+
+zip_summary.head(10)
+#Group by City to understand well-served vs underserved areas
+city_summary = (
+    ev_il_df.groupby('City')
+    .agg({
+        'Total Chargers': 'sum',
+        'EV Level2 EVSE Num': 'sum',
+        'EV DC Fast Count': 'sum',
+        'Station Name': 'count'
+    })
+    .rename(columns={'Station Name': 'Station Count'})
+    .sort_values('Total Chargers', ascending=False)
+)
+
+city_summary.head(10)
+#plot the data 
+import matplotlib.pyplot as plt
+
+# Bar plot: Top 10 cities by total chargers
+top_cities = city_summary.sort_values('Total Chargers', ascending=False).head(10)
+
+plt.figure(figsize=(10, 6))
+top_cities['Total Chargers'].plot(kind='bar')
+plt.title('Top 10 Illinois Cities by Total EV Chargers')
+plt.ylabel('Number of Chargers')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+#Where are high-dwell-time chargers already placed (ideal for food/retail)?
+top_dc_zip = zip_summary.sort_values('EV DC Fast Count', ascending=False).head(10)
+
+plt.figure(figsize=(10, 6))
+top_dc_zip['EV DC Fast Count'].plot(kind='bar', color='orange')
+plt.title('Top 10 ZIP Codes in Illinois by DC Fast Chargers')
+plt.ylabel('Number of DC Fast Chargers')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+#Will compare these with the registration to see if any of these zips have hight demand
+low_zip_counts = zip_summary[zip_summary['Total Chargers'] <= 2]
+low_zip_counts.shape[0]
+low_zip_counts.sort_values('Total Chargers').head(10)
+# Plot histogram
+plt.figure(figsize=(10, 6))
+plt.hist(zip_summary['Total Chargers'], bins=30, color='steelblue', edgecolor='black')
+plt.title('Distribution of Total EV Chargers per ZIP Code in Illinois')
+plt.xlabel('Total Chargers in ZIP Code')
+plt.ylabel('Number of ZIP Codes')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+#Access types Public V Private 
+print(ev_il_df['Access Code'].value_counts())
+ev_il_df.groupby('Access Code')['Total Chargers'].sum()
+
+
+# Plotting
+plt.figure(figsize=(12, 6))
+plt.bar(top_cities.index, top_cities['EV Level2 EVSE Num'], label='Level 2 Chargers')
+plt.bar(top_cities.index, top_cities['EV DC Fast Count'], bottom=top_cities['EV Level2 EVSE Num'], label='DC Fast Chargers')
+
+plt.xlabel('City')
+plt.ylabel('Number of Chargers')
+plt.title('Charger Type Distribution in Top 10 IL Cities')
+plt.xticks(rotation=45)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+charger_ratios = ev_il_df.groupby('ZIP').agg({
+    'EV Level2 EVSE Num': 'sum',
+    'EV DC Fast Count': 'sum'
+}).assign(dc_fast_ratio=lambda df: df['EV DC Fast Count'] / (df['EV Level2 EVSE Num'] + 1))
+print(charger_ratios)
+
+import folium
+from folium.plugins import MarkerCluster
+
+# Fill missing charger counts with 0
+ev_il_df['EV DC Fast Count'] = ev_il_df['EV DC Fast Count'].fillna(0)
+ev_il_df['EV Level2 EVSE Num'] = ev_il_df['EV Level2 EVSE Num'].fillna(0)
+
+# Create map centered over Illinois
+m = folium.Map(location=[40.0, -89.0], zoom_start=6)
+
+# Create marker cluster
+marker_cluster = MarkerCluster().add_to(m)
+
+# Add markers
+for _, row in ev_il_df.iterrows():
+    lat = row['Latitude']
+    lon = row['Longitude']
+    name = row['Station Name']
+    address = row['Street Address']
+    city = row['City']
+    zip_code = row['ZIP']
+    dc_fast = int(row['EV DC Fast Count'])
+    level2 = int(row['EV Level2 EVSE Num'])
+    
+    popup_text = f"""
+    <b>{name}</b><br>
+    {address}, {city}, IL {zip_code}<br>
+    Level 2 Chargers: {level2}<br>
+    DC Fast Chargers: {dc_fast}
+    """
+    
+    # Color based on presence of DC Fast
+    color = 'green' if dc_fast > 0 else 'blue'
+    
+    folium.Marker(
+        location=[lat, lon],
+        popup=popup_text,
+        icon=folium.Icon(color=color)
+    ).add_to(marker_cluster)
+
+# Save map
+m.save("illinois_ev_chargers_map.html")
+
+facility_counts = ev_il_df['Facility Type'].value_counts()
+filtered_counts = facility_counts[facility_counts >= 10]
+filtered_counts.sort_values(ascending=True).plot(kind='barh', figsize=(10, 6))
+
+# Convert Open Date to datetime
+ev_il_df['Open Date'] = pd.to_datetime(ev_il_df['Open Date'], errors='coerce')
+
+# Extract year from Open Date
+ev_il_df['Open Year'] = ev_il_df['Open Date'].dt.year
+
+# Drop null years if any, then group and plot
+ev_il_df['Open Year'].dropna().value_counts().sort_index().plot(kind='bar', figsize=(10, 5))
+plt.title('Number of EV Stations Opened Per Year in Illinois')
+plt.xlabel('Year')
+plt.ylabel('Number of Stations')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+ev_il_df['Open Date'].max()
+
+# Step 2: Filter for non-electric stations in Illinois
+non_elec_df = df[(df['Fuel Type Code'] != 'ELEC') & (df['State'] == 'IL')]
+
+# Step 3: Group both datasets by ZIP
+non_elec_counts = non_elec_df.groupby("ZIP").size().reset_index(name="Non-Electric Station Count")
+elec_counts = ev_il_df.groupby("ZIP").size().reset_index(name="Electric Station Count")
+
+# Step 4: Merge and identify ZIPs with non-EV stations but no EV stations
+merged = pd.merge(non_elec_counts, elec_counts, on="ZIP", how="left").fillna(0)
+merged["Electric Station Count"] = merged["Electric Station Count"].astype(int)
+no_ev_zips = merged[merged["Electric Station Count"] == 0]
+
+# Step 5: Add city information (take first city per ZIP from non_elec_df)
+zip_city_map = non_elec_df[['ZIP', 'City']].drop_duplicates(subset='ZIP')
+no_ev_zips = no_ev_zips.merge(zip_city_map, on='ZIP', how='left')
+
+# Step 6: Display top ZIPs that already have stations but no EV support
+no_ev_zips.sort_values("Non-Electric Station Count", ascending=False).head(20)
+
+# Filter to only non-EV stations in IL
+non_elec_il_df = df[(df['Fuel Type Code'] != 'ELEC') & (df['State'] == 'IL')]
+
+# Identify ZIPs in IL with no EV chargers
+zips_with_ev = ev_il_df['ZIP'].unique()
+non_ev_zip_summary = non_elec_il_df[~non_elec_il_df['ZIP'].isin(zips_with_ev)] \
+    .groupby('ZIP') \
+    .size() \
+    .sort_values(ascending=False).head(20)
+
+# Plot ZIP-level
+plt.figure(figsize=(10, 6))
+non_ev_zip_summary.plot(kind='barh')
+plt.xlabel("Number of Non-EV Stations")
+plt.ylabel("ZIP Code")
+plt.title("Top IL ZIPs with Non-EV Stations and No EV Chargers")
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.show()
+
+# Identify Cities in IL with no EV chargers
+cities_with_ev = ev_il_df['City'].str.upper().unique()
+non_ev_city_summary = non_elec_il_df[~non_elec_il_df['City'].str.upper().isin(cities_with_ev)] \
+    .groupby('City') \
+    .size() \
+    .sort_values(ascending=False).head(20)
+
+# Plot City-level
+plt.figure(figsize=(10, 6))
+non_ev_city_summary.plot(kind='barh')
+plt.xlabel("Number of Non-EV Stations")
+plt.ylabel("City")
+plt.title("Top IL Cities with Non-EV Stations and No EV Chargers")
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.show()
+
