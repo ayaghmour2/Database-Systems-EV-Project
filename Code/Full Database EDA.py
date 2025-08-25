@@ -7,18 +7,16 @@ Created on Thu Aug 21 19:10:22 2025
 
 ## Packages
 import os
-import psycopg2
 import pdfplumber
 import pandas as pd
 import glob
 import re
-import matplotlib.pyplot as plt
 import requests
-import seaborn as sns
 import time
 import sys
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.exc import ProgrammingError
+from collections import defaultdict
 
 
 ## Set directory
@@ -224,19 +222,19 @@ start = time.time()
 
 for i, pdf_file in enumerate(pdf_files, start=1):
     with pdfplumber.open(pdf_file) as pdf:
-        text = ""
+        filetext = ""
         for page in pdf.pages:
             t = page.extract_text() or ""
-            text += t + "\n"
+            filetext += t + "\n"
 
     ## Extract date from header
-    date_match = re.search(r"AS OF (\d{2}/\d{2}/\d{4})", text)
+    date_match = re.search(r"AS OF (\d{2}/\d{2}/\d{4})", filetext)
     date = pd.to_datetime(date_match.group(1)) if date_match else None
 
     ## County table extraction
     county_section = re.search(
         r"COUNTY TOTALS AS OF.*?\n(.*?)(?:ELECTRIC VEHICLES IN ILLINOIS ZIPCODE TOTALS|ELECTRIC VEHICLES IN ILLINOIS\\nZIPCODE TOTALS|ZIPCODE TOTALS AS OF)",
-        text, re.DOTALL
+        filetext, re.DOTALL
     )
     if county_section:
         for line in county_section.group(1).split("\n"):
@@ -251,7 +249,7 @@ for i, pdf_file in enumerate(pdf_files, start=1):
                 })
 
     ## Zip code table extraction
-    zip_section = re.search(r"ZIPCODE TOTALS AS OF.*?\n(.*)", text, re.DOTALL)
+    zip_section = re.search(r"ZIPCODE TOTALS AS OF.*?\n(.*)", filetext, re.DOTALL)
     if zip_section:
         for line in zip_section.group(1).split("\n"):
             match = re.match(r"([A-Z .'-]+)\s+(\d{5})\s+([0-9]+)", line.strip())
@@ -342,3 +340,238 @@ zip_demo_df.to_sql("zip_demo_df", engine, index=False, if_exists="replace")
 
 ## County demographics
 county_demo_df.to_sql("county_demo_df", engine, index=False, if_exists="replace")
+
+###############################################################################
+###############################################################################
+                        ########################
+                      ####### Just Conncet #######
+                        ########################
+###############################################################################
+###############################################################################
+
+## Connect to your existing database
+engine = create_engine("postgresql+psycopg2://postgres:JopFlop17@localhost:5432/ev_project", future=True)
+
+## Test query
+try:
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT version();"))
+        version = result.scalar()
+        print("✅ Connected successfully!")
+        print("PostgreSQL version:", version)
+except Exception as e:
+    print("❌ Connection failed:", e)
+
+## Find tables
+## Use the same engine connected to your database
+inspector = inspect(engine)
+
+## Get all table names
+tables = inspector.get_table_names()
+print("Tables in database:", tables)
+
+## Loop through each table and print its columns
+for table in tables:
+    print(f"\n Columns in table '{table}':")
+    columns = inspector.get_columns(table)
+    for col in columns:
+        print(f"  - {col['name']} ({col['type']})")
+
+##### Registered Units with No Chargers #####
+## Identify zipcodes with no charging stations but registered EVs
+## Query ZIP codes with registered EVs and their counts
+ev_zipcodes_query = """
+SELECT zipcode, SUM("Count") AS ev_count
+FROM zipcode_registration_df
+WHERE zipcode IS NOT NULL AND "Count" > 0
+GROUP BY zipcode
+
+"""
+ev_zipcodes = pd.read_sql(ev_zipcodes_query, engine)
+
+## Query ZIP codes with charging stations
+charging_zipcodes_query = "SELECT DISTINCT zipcode FROM il_df WHERE zipcode IS NOT NULL"
+charging_zipcodes = pd.read_sql(charging_zipcodes_query, engine)
+
+## Identify ZIP codes with EV registrations but no charging stations
+ev_only_zipcodes = ev_zipcodes[~ev_zipcodes['zipcode'].isin(charging_zipcodes['zipcode'])]
+
+## Sort by most registered EVs to least
+ev_only_zipcodes_sorted = ev_only_zipcodes.sort_values(by='ev_count', ascending=False)
+
+## Display the result
+print("ZIP codes with registered EVs but no charging stations (sorted by EV count):")
+print(ev_only_zipcodes_sorted)
+
+## Understand what they did in 2025 by grabbing the average
+ev_2025_query = """
+    SELECT zipcode, AVG("Count") AS avg_ev_count_2025
+    FROM zipcode_registration_df
+    WHERE zipcode IS NOT NULL AND "Count" > 0 AND EXTRACT(YEAR FROM "Date") = 2025
+    GROUP BY zipcode
+"""
+ev_2025 = pd.read_sql(ev_2025_query, engine)
+
+## Filter only ZIPs without charging stations
+ev_2025_filtered = ev_2025[ev_2025['zipcode'].isin(ev_only_zipcodes['zipcode'])]
+
+## Sort by highest count
+ev_2025_filtered_sorted = ev_2025_filtered.sort_values(by='avg_ev_count_2025', ascending=False)
+
+## Display only those with more then 15 units on average
+ev_2025_filtered_15up = ev_2025_filtered_sorted[ev_2025_filtered_sorted['avg_ev_count_2025'] > 15]
+print(ev_2025_filtered_15up)
+
+## Display only those with more then 100 units on average
+ev_2025_filtered_100up = ev_2025_filtered_sorted[ev_2025_filtered_sorted['avg_ev_count_2025'] > 100]
+print(ev_2025_filtered_100up)
+
+##### Explore average units per station #####
+## Get average EV registrations in 2025 per ZIP code
+ev_2025_avg_query = """
+    SELECT zipcode, AVG("Count") AS avg_ev_count_2025
+    FROM zipcode_registration_df
+    WHERE zipcode IS NOT NULL AND "Count" > 0 AND EXTRACT(YEAR FROM "Date") = 2025
+    GROUP BY zipcode
+"""
+ev_2025_avg = pd.read_sql(ev_2025_avg_query, engine)
+
+## Get the most recent month of charging station data
+latest_date_query = """
+    SELECT MAX("Date Last Confirmed") AS latest_date
+    FROM il_df
+    WHERE "Date Last Confirmed" IS NOT NULL
+"""
+latest_date = pd.read_sql(latest_date_query, engine).iloc[0]['latest_date']
+
+## Get number of charging stations per ZIP code for the most recent month
+charging_station_query = f"""
+    SELECT zipcode, COUNT(*) AS station_count
+    FROM il_df
+    WHERE "Date Last Confirmed" = '{latest_date}' AND zipcode IS NOT NULL
+    GROUP BY zipcode
+"""
+charging_stations = pd.read_sql(charging_station_query, engine)
+
+## Merge EV data with charging station data
+merged_df = pd.merge(ev_2025_avg, charging_stations, on='zipcode')
+
+## Calculate average EV units per charging station
+merged_df['evs_per_station'] = merged_df['avg_ev_count_2025'] / merged_df['station_count']
+
+## Display the result
+print("Average EV units per charging station by ZIP code:")
+print(merged_df.sort_values(by='evs_per_station', ascending=False))
+
+## Find any zipcodes with more then 150 EVs per station
+high_ev_low_charge_df = merged_df[merged_df['evs_per_station'] > 150]
+
+## Display the result
+print("ZIP codes with more than 150 EVs per charging station:")
+print(high_ev_low_charge_df)
+    
+## Get top 10 ZIP codes
+top_10_high_ev_low_charge_df = high_ev_low_charge_df.sort_values(by='evs_per_station', ascending=False).head(10)
+
+## Display the result
+print("Top 10 ZIP codes with highest EVs per charging station:")
+print(top_10_high_ev_low_charge_df)
+
+## Any above 500 EVs per Station
+## Find any zipcodes with more then 150 EVs per station
+critical_areas_df = high_ev_low_charge_df[high_ev_low_charge_df['evs_per_station'] > 500]
+
+## Sort from high to low
+critical_areas_df = critical_areas_df.sort_values(by='evs_per_station', ascending=False)
+
+## Display the result
+print("ZIP codes with more than 500 EVs per charging station (sorted):")
+print(critical_areas_df)
+
+##### Explore largest increases in registrations #####
+## Load zipcode data
+query = """
+SELECT *
+FROM zipcode_registration_df
+ORDER BY "Date";
+"""
+zipcode_registration_df = pd.read_sql(query, engine)
+
+## Group by zipcode
+registration_changed_df = zipcode_registration_df.groupby(['zipcode'])
+
+## Extract first and last entries
+registration_changed_df = registration_changed_df.agg(
+    first_date=('Date', 'first'),
+    last_date=('Date', 'last'),
+    first_count=('Count', 'first'),
+    last_count=('Count', 'last')
+).reset_index()
+
+## Calculate absolute change
+registration_changed_df['count_change'] = (
+    registration_changed_df['last_count'] - registration_changed_df['first_count']
+)
+
+## Calculate percent change
+registration_changed_df['percent_change'] = registration_changed_df.apply(
+    lambda row: ((row['count_change'] / row['first_count']) * 100) if row['first_count'] > 0 else None,
+    axis=1
+)
+
+## Top 25 in nominal increase
+top_25_zipcodes = registration_changed_df.sort_values(by='count_change', ascending=False).head(25)
+print(top_25_zipcodes[['zipcode', 'first_count', 'last_count', 'count_change', 'percent_change']])
+
+## Top 25 in percent increase
+top_25_percent_zipcodes = registration_changed_df.sort_values(by='percent_change', ascending=False).head(25)
+print(top_25_percent_zipcodes[['zipcode', 'first_count', 'last_count', 'count_change', 'percent_change']])
+
+##### Identify Overlap #####
+## Create a dictionary to store zipcodes
+zipcode_sources = defaultdict(set)
+
+## Extract sets of zipcodes from each DataFrame
+ev_only_set = set(ev_only_zipcodes['zipcode'])
+high_ev_low_charge_set = set(high_ev_low_charge_df['zipcode'])
+top_25_set = set(top_25_zipcodes['zipcode'])
+top_25_percent_set = set(top_25_percent_zipcodes['zipcode'])
+
+## Add ZIP codes from each set with source labels
+for zc in ev_only_set:
+    zipcode_sources[zc].add('ev_only_zipcodes')
+for zc in high_ev_low_charge_set:
+    zipcode_sources[zc].add('high_ev_low_charge_df')
+for zc in top_25_set:
+    zipcode_sources[zc].add('top_25_zipcodes')
+for zc in top_25_percent_set:
+    zipcode_sources[zc].add('top_25_percent_zipcodes')
+
+## Filter ZIP codes that appear in at least two sets
+filtered_zipcodes = {zc: sources for zc, sources in zipcode_sources.items() if len(sources) >= 2}
+
+## Save as a dataframe and display
+result_df = pd.DataFrame({
+    'zipcode': list(filtered_zipcodes.keys()),
+    'dataframes': [", ".join(sources) for sources in filtered_zipcodes.values()]
+})
+
+print("Zipcodes appearing in at least two sets and their sources:")
+print(result_df)
+print(f"Total: {len(result_df)} zipcodes")
+
+## Find the zipcodes in three
+three_set_zipcodes = {zc: sources for zc, sources in zipcode_sources.items() if len(sources) >= 3}
+
+three_result_df = pd.DataFrame({
+    'zipcode': list(three_set_zipcodes.keys()),
+    'dataframes': [", ".join(sources) for sources in three_set_zipcodes.values()]
+})
+
+print("Zipcodes appearing in at least three sets and their sources:")
+print(three_result_df)
+print(f"Total: {len(result_df)} zipcodes")
+
+## 60666
+## 60018 <- apart of the critical_areas_df
+
